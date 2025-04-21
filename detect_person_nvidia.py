@@ -1,15 +1,21 @@
+# python
 import os
+import sys
 import threading
 import torch
 import cv2
 import numpy as np
 import time
-import datetime
 import subprocess
 import math
-
 from ultralytics import YOLO
 from camera_list import cameras
+
+# Optional: Import the TensorRT conversion function
+try:
+    from onnx_to_tensorrt import build_engine
+except ImportError:
+    build_engine = None
 
 # Global dictionary and lock for frames
 display_frames = {}
@@ -51,12 +57,12 @@ class PersonDetection:
                  history_size: int = 3) -> None:
         self.device = get_device()
         print(f"Using device: {self.device}")
-        self.model = YOLO('yolov8n.pt')
+        self.model = YOLO("models/yolov8n.pt")
         self.model.to(self.device)
         self.confidence_threshold = confidence_threshold
         self.person_class = 0  # Person class in YOLOv8
         self.notifier = Notifier()
-        self.roi = roi  # tuple (x, y, w, h); if None, process full frame
+        self.roi = roi  # tuple (x, y, w, h); if None, full frame is processed
         self.movement_threshold = movement_threshold
         self.previous_frame = None
         self.frame_history = []
@@ -78,15 +84,13 @@ class PersonDetection:
         if self.previous_frame is None:
             self.previous_frame = frame.copy()
             return []
-
-        # Calculate difference between current and previous frame for motion detection
         diff = cv2.absdiff(self.previous_frame, frame)
         gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
         blur_diff = cv2.GaussianBlur(gray_diff, (5, 5), 0)
         _, thresh_diff = cv2.threshold(blur_diff, 20, 255, cv2.THRESH_BINARY)
 
         current_time = time.time()
-        outdated_keys = [pos for pos, (last_time, _) in self.consecutive_detections.items()
+        outdated_keys = [key for key, (last_time, _) in self.consecutive_detections.items()
                          if current_time - last_time > 5.0]
         for key in outdated_keys:
             del self.consecutive_detections[key]
@@ -117,7 +121,8 @@ class PersonDetection:
                                 self.consecutive_detections[pos_key] = (current_time, count + 1)
                             else:
                                 self.consecutive_detections[pos_key] = (current_time, 1)
-                            if self.consecutive_detections[pos_key][1] >= 2 or motion_percentage > self.movement_threshold * 2:
+                            if (self.consecutive_detections[pos_key][1] >= 2 or
+                                motion_percentage > self.movement_threshold * 2):
                                 persons.append(candidate)
                         else:
                             if pos_key in self.consecutive_detections:
@@ -222,11 +227,24 @@ def combine_frames(frames: list) -> np.ndarray:
     return combined_frame
 
 def main() -> None:
+    # Optional conversion: if '--convert' flag is set and conversion function exists,
+    # build the TensorRT engine from the ONNX model.
+    if "--convert" in sys.argv and build_engine is not None:
+        onnx_model_path = "models/model.onnx"
+        engine_path = "models/model.trt"
+        try:
+            engine = build_engine(onnx_model_path, engine_path)
+            print("TensorRT engine built and saved.")
+        except Exception as e:
+            print(f"Failed to build TensorRT engine: {e}")
+        # Exit after conversion if desired.
+        sys.exit(0)
+
     threads = []
     for cam in cameras:
         t = threading.Thread(
             target=monitor_camera,
-            args=(cam['url'], cam['name'], cam['roi'],
+            args=(cam["url"], cam["name"], cam["roi"],
                   stop_event, display_frames, display_lock)
         )
         t.start()
@@ -238,7 +256,7 @@ def main() -> None:
             combined_frame = combine_frames(frames)
             if combined_frame is not None:
                 cv2.imshow("Combined Cameras", combined_frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             stop_event.set()
             break
     for t in threads:
